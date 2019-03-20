@@ -20,11 +20,17 @@ NOTICE
 
 1. X86有几个特权级？
 
+4个
+
 
 2. 不同特权级有什么区别？
 
+高特权级下的指令不能再低特权级下运行。一条指令在不同特权级下能访问的数据范围不同，一条指令在不同特权级下的行为不同。
+
 
 3. 请说明CPL、DPL和RPL在中断响应、函数调用和指令执行时的作用。
+
+访问门时，从低优先级代码访问高优先级服务；访问段时，从高优先级代码访问低优先级服务。
 
 
 4. 写一个示例程序，完成4个特权级间的函数调用和数据访问时特权级控制的作用。
@@ -32,15 +38,26 @@ NOTICE
 ### 7.2 了解特权级切换过程
 
 1. 一条指令在执行时会有哪些可能的特权级判断？
-2. 在什么情况下会出现特权级切换？
 
-3. int指令在ring0和ring3的执行行为有什么不同？
+代码访问数据时，需检查当前特权级是否高于或等于数据段的DPL；若通过段寄存器SS访问数据段，则要求CPL、RPL=DPL；若涉及控制转移，一般只允许低特权级调用高特权级代码；发生中断或异常时，需要判断当前门描述符的特权级和目标代码的特权级。
+
+1. 在什么情况下会出现特权级切换？
+
+发生中断或低特权级代码调用高特权级代码时。
+
+1. int指令在ring0和ring3的执行行为有什么不同？
+
+ring3下发生栈切换，且多压入SS、ESP。
 
 
 4. 如何利用int和iret指令完成不同特权级的切换？
 
+构造所需的栈结构，然后通过int和iret指令进行切换。
+
 
 5. TSS和Task Register的作用是什么？
+
+TSS是x86中储存任务信息的结构，储存包裹处理器寄存器状态、IO端口状态、栈指针、上一个TSS的链接等信息。Task Register是一个16位的储存TSS的段选择子的寄存器。
 
  > [Task state segment](https://en.wikipedia.org/wiki/Task_state_segment)
 
@@ -49,13 +66,79 @@ NOTICE
 ### 7.3 了解段/页表
 
 1. 一条指令执行时最多会出现多少次地址转换？
-2. 描述X86-32的MMU地址转换过程；
+
+两次，虚拟地址到线性地址再到物理地址。
+
+1. 描述X86-32的MMU地址转换过程；
+
+从虚拟地址通过段机制转换成线性地址，再从线性地址通过页机制转换成物理地址。
 
 ### 7.4 了解UCORE建立段/页表
 
 1. 分析MMU的使能过程，尽可能详细地分析在执行进入保护械的代码“movl %eax, %cr0 ; ljmp $CODE_SEL, $0x0”时，CPU的状态和寄存器内容的变化。
 
-2. 分析页表的建立过程；
+执行movl指令时仅仅改变了cr0寄存器的值，并没有进入保护模式，指令长度仍为16位；执行ljmp指令进行段间跳转时清空指令队列，从CODE_SEL段的地址为0处继续执行，进入保护模式。
+
+1. 分析页表的建立过程；
+
+页表初始化过程如下：
+
+```c
+/* pmm_init - initialize the physical memory management */
+static void
+page_init(void) {
+    struct e820map *memmap = (struct e820map *)(0x8000 + KERNBASE);
+    uint64_t maxpa = 0;
+
+    cprintf("e820map:\n");
+    int i;
+    for (i = 0; i < memmap->nr_map; i ++) {
+        uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+        cprintf("  memory: %08llx, [%08llx, %08llx], type = %d.\n",
+                memmap->map[i].size, begin, end - 1, memmap->map[i].type);
+        if (memmap->map[i].type == E820_ARM) {
+            if (maxpa < end && begin < KMEMSIZE) {
+                maxpa = end;
+            }
+        }
+    }
+    if (maxpa > KMEMSIZE) {
+        maxpa = KMEMSIZE;
+    }
+
+    extern char end[];
+
+    npage = maxpa / PGSIZE;
+    pages = (struct Page *)ROUNDUP((void *)end, PGSIZE);
+
+    for (i = 0; i < npage; i ++) {
+        SetPageReserved(pages + i);
+    }
+
+    uintptr_t freemem = PADDR((uintptr_t)pages + sizeof(struct Page) * npage);
+
+    for (i = 0; i < memmap->nr_map; i ++) {
+        uint64_t begin = memmap->map[i].addr, end = begin + memmap->map[i].size;
+        if (memmap->map[i].type == E820_ARM) {
+            if (begin < freemem) {
+                begin = freemem;
+            }
+            if (end > KMEMSIZE) {
+                end = KMEMSIZE;
+            }
+            if (begin < end) {
+                begin = ROUNDUP(begin, PGSIZE);
+                end = ROUNDDOWN(end, PGSIZE);
+                if (begin < end) {
+                    init_memmap(pa2page(begin), (end - begin) / PGSIZE);
+                }
+            }
+        }
+    }
+}
+```
+
+可见页表储存在了内核基址（0xC0000000）偏移0x8000处。函数遍历各个也，设置起始等信息。
 
 ## 个人思考题
 
@@ -69,6 +152,8 @@ x86保护模式中权限管理无处不在，下面哪些时候要检查访问�
 * [ ] ALU计算过程中
 
 请描述ucore OS建立页机制的准备工作包括哪些步骤？ \(w4l1\)
+
+初始化GDT，建立段机制；探测物理内存，管理空闲物理内存；初始化页表，设置CR0寄存器使能页机制。
 
 
 ## 小组思考题
@@ -160,7 +245,30 @@ va 0xcd82c07c, pa 0x0c20907c, pde_idx 0x00000336, pde_ctx  0x00037003, pte_idx 0
 
 （2）Intel8086不支持页机制，但有hacker设计过包含未做任何改动的8086CPU的分页系统。猜想一下，hacker是如何做到这一点的？提示：想想MMU的逻辑位置
 
+## 页表自映射机制思考题
 
+1. (easy) 自映射的目的是什么？它相比线性映射的好处、不足是什么？
+2. (easy) Linux和Windows分别采用哪种映射机制（线性映射or自映射）？它们的选择背后有什么原因吗？
+
+以下为optional：
+
+1. (midd) 在x86-32中，假设页目录的第R个页表项是自映射的，那么：
+
+   1. 可以通过哪个虚拟地址访问到页目录？
+   2. 控制虚地址`vaddr`所在页的页表项地址是多少？（假设在`vaddr`发生了缺页异常，根据你给出的答案，就可以快速地修改相应的页表项）
+   3. 当你试图访问上述页表项时，又发生了缺页异常。这可能是什么原因？
+
+2. (midd) 如何合理设置自映射页表，使得用户程序可以看到自己的页表，但不能修改或是看到内核部分？（参考ucore lab中的`sys_pgdir`）
+
+3. (hard) 修改自映射页表：现在有两个自映射页表A和B，其中A是活动的（CR3指向pgdir），B是非活动的。如何在不切换页表（不修改CR3）的条件下，通过自映射区域修改页表B？
+
+4. (challenge) RISCV中的自映射机制：
+
+   如果照搬x86的方式，在RISCV中配置自映射页表，那么会在访问页目录时触发PageFault。原因是，根据规范，RISCV中的页表项不能被同时解读为【指向页表】和【指向数据页】（前者的flags是V，后者是VRW）。如果设置为V，那么在解读最后一级时会触发异常，如果设置为VRW，则会在第一级被认为是一个大数据页。而在x86中，同一个页表项在最后一级被解读为指向数据页，在中间级则被解读为指向页表，因此方便实现自映射。
+
+   请你在x86自映射的基础上进行一些修改，为RISCV32设计一种自映射的实现方案。并描述一次修改页表项的完整过程。
+
+参考阅读：[Advanced Paging](https://os.phil-opp.com/advanced-paging/)
 
 ## v9-cpu相关
 
