@@ -57,7 +57,7 @@
 
  > init_main
 
- > trap
+ > trap 
 
 ### 16.3 时间片轮转调度算法
 
